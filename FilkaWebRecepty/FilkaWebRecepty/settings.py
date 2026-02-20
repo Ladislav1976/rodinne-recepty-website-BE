@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "django_filters",
     "FilkaRecepty",
     "django.contrib.postgres",
+    "imagekit",
 ]
 
 MIDDLEWARE = [

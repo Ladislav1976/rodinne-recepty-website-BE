@@ -7,6 +7,7 @@ from rest_framework import routers
 from . import views
 from .views import (
     CookieTokenRefreshView,
+    FoodListViewSet,
     FoodTagsViewSet,
     FoodViewSet,
     ForgotPassword,
@@ -28,6 +29,7 @@ from .views import (
 
 router = routers.DefaultRouter()  # noqa: F811
 (router.register("foods", FoodViewSet),)
+router.register("foodsList", FoodListViewSet, basename="foodsList")
 router.register("foodTags", FoodTagsViewSet)
 router.register("tagGroups", TagGroupViewSet)
 router.register("steps", StepsViewSet)

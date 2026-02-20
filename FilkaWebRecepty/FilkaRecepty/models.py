@@ -1,8 +1,8 @@
 import os
 import shutil
+import unicodedata
 import uuid
 
-import PIL
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
@@ -11,6 +11,8 @@ from django.db.models.signals import post_delete, pre_save
 from django.dispatch import receiver
 from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
+from imagekit.models import ImageSpecField, ProcessedImageField
+from imagekit.processors import ResizeToFill, ResizeToFit
 from PIL import Image
 
 
@@ -132,14 +134,22 @@ def auto_delete_old_avatar_on_change(sender, instance, **kwargs):
 
 
 class TagGroups(models.Model):
-    groupName = models.CharField(max_length=60, unique=True)
+    groupName = models.CharField(
+        max_length=60,
+        unique=True,
+        error_messages={"unique": "Táto skupina už existuje."},
+    )
 
     def __str__(self):
         return self.groupName
 
 
 class FoodTags(models.Model):
-    foodTag = models.CharField(max_length=60, unique=True)
+    foodTag = models.CharField(
+        max_length=60,
+        unique=True,
+        error_messages={"unique": "Toto označenie už v tejto skupine existuje."},
+    )
     group = models.ForeignKey(
         TagGroups,
         related_name="food_tags",
@@ -161,14 +171,18 @@ class FoodTags(models.Model):
 class Steps(models.Model):
     food = models.ForeignKey("Foods", on_delete=models.CASCADE, related_name="steps")
     step = models.CharField(max_length=1500, unique=False)
-    position = models.DecimalField(max_digits=10, decimal_places=0)
+    position = models.PositiveIntegerField(default=1)
 
     def __str__(self):
         return self.step
 
 
 class Unit(models.Model):
-    unit = models.CharField(max_length=60, unique=True)
+    unit = models.CharField(
+        max_length=60,
+        unique=True,
+        error_messages={"unique": "Táto jednotka už existuje."},
+    )
 
     def __str__(self):
         return self.unit
@@ -192,12 +206,12 @@ class Url(models.Model):
 
 class Ingredients(models.Model):
     food = models.ForeignKey(
-        "Foods", on_delete=models.CASCADE, related_name="Ingredients"
+        "Foods", on_delete=models.CASCADE, related_name="ingredients"
     )
     units = models.ManyToManyField(Unit, related_name="units")
-    quantity = models.CharField(max_length=60)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     ingredientName = models.ManyToManyField(Ingredient, related_name="ingredientName")
-    position = models.DecimalField(max_digits=10, decimal_places=0)
+    position = models.PositiveIntegerField(default=1)
 
     # ingreposition = models.DecimalField(max_digits=10, decimal_places=0)
     def __str__(self):
@@ -211,23 +225,42 @@ def get_upload_path(instance, filename):
 class ImageFood(models.Model):
     food = models.ForeignKey("Foods", on_delete=models.CASCADE, related_name="images")
     upload_folder = models.CharField(max_length=255)
-    image = models.ImageField(
-        blank=True, null=True, upload_to=get_upload_path, verbose_name="Food image"
+    image = ProcessedImageField(
+        upload_to=get_upload_path,
+        processors=[
+            ResizeToFit(None, 1000)
+        ],  # Resize na výšku 1000px, šírka sa dopočíta
+        format="JPEG",
+        options={"quality": 80},
+        blank=True,
+        null=True,
     )
-    position = models.DecimalField(max_digits=10, decimal_places=0)
+    # image = models.ImageField(
+    #     blank=True, null=True, upload_to=get_upload_path, verbose_name="Food image"
+    # )
+    position = models.PositiveIntegerField(default=1)
+    thumbnail = ImageSpecField(
+        source="image",
+        processors=[ResizeToFill(400, 300)],
+        format="WEBP",  # WebP je výrazne menší ako JPEG
+        options={"quality": 70},
+    )
 
-    def save(self, *args, **kwargs):
-        super().save(*args, **kwargs)
-        if self.image:
-            img = Image.open(self.image.path)
-            fixed_height = 1000
-            height_percent = fixed_height / float(img.size[1])
-            width_size = int(float(img.size[0]) * float(height_percent))
-            img = img.resize((width_size, fixed_height), PIL.Image.NEAREST)
-            img.save(self.image.path, optimize=True, quality=80)
+    # def save(self, *args, **kwargs):
+    #     super().save(*args, **kwargs)
+    #     if self.image:
+    #         img = Image.open(self.image.path)
+    #         if img.height > 1000:
+    #             fixed_height = 1000
+    #             height_percent = fixed_height / float(img.size[1])
+    #             width_size = int(float(img.size[0]) * float(height_percent))
+    #             img = img.resize(
+    #                 (width_size, fixed_height), PIL.Image.Resampling.LANCZOS
+    #             )
+    #             img.save(self.image.path, optimize=True, quality=80)
 
     def __str__(self):
-        return self.upload_folder
+        return self.upload_folder or f"Image for {self.food.name}"
 
     def __unicode__(self):
         return self.upload_folder
@@ -269,19 +302,36 @@ def auto_delete_file_on_delete(sender, instance, **kwargs):
             shutil.rmtree(folder)
 
 
+def remove_accents(self, text):
+    import unicodedata
+
+    nfkd_form = unicodedata.normalize("NFKD", text)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+
 class Foods(models.Model):
     name = models.CharField(max_length=60)
-    # images=models.ManyToManyField(ImageFood, related_name='images',blank=True)
-    # ingredients = models.ManyToManyField(Ingredients, related_name='ingredients')
-    # steps=models.ManyToManyField(Steps, related_name='steps')
-    # urls=models.ManyToManyField(Url, related_name='urls',blank=True)
     date = models.DateTimeField()
     foodTags = models.ManyToManyField(FoodTags, related_name="foodTags")
-    # user = models.ManyToManyField(CustomUser, related_name='user')
     user = models.ForeignKey(CustomUser, on_delete=models.PROTECT, related_name="foods")
+    search_name = models.CharField(
+        max_length=60, editable=False, db_index=True, blank=True
+    )
 
     def __str__(self):
         return self.name
+
+    def remove_accents(self, text):
+        if not text:
+            return ""
+        nfkd_form = unicodedata.normalize("NFKD", text)
+        return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+    def save(self, *args, **kwargs):
+        # Pri každom uložení receptu si pripravíme "hľadací" text
+        if self.name:
+            self.search_name = self.remove_accents(self.name.lower())
+        super().save(*args, **kwargs)
 
 
 class PasswordReset(models.Model):
