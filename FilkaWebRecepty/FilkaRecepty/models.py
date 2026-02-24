@@ -157,8 +157,7 @@ class FoodTags(models.Model):
     )
 
     def delete(self, *args, **kwargs):
-        # Skontrolujeme, či je tento tag v nejakom Food objekte
-        if self.foodTags.exists():  # 'foodTags' je related_name z modelu Foods
+        if self.foodTags.exists():
             raise ValidationError(
                 f"Tag '{self.foodTag}' nemôžete vymazať, lebo je priradený k receptu."
             )
@@ -213,7 +212,6 @@ class Ingredients(models.Model):
     ingredientName = models.ManyToManyField(Ingredient, related_name="ingredientName")
     position = models.PositiveIntegerField(default=1)
 
-    # ingreposition = models.DecimalField(max_digits=10, decimal_places=0)
     def __str__(self):
         return self.quantity
 
@@ -227,37 +225,20 @@ class ImageFood(models.Model):
     upload_folder = models.CharField(max_length=255)
     image = ProcessedImageField(
         upload_to=get_upload_path,
-        processors=[
-            ResizeToFit(None, 1000)
-        ],  # Resize na výšku 1000px, šírka sa dopočíta
+        processors=[ResizeToFit(None, 1000)],
         format="JPEG",
         options={"quality": 80},
         blank=True,
         null=True,
     )
-    # image = models.ImageField(
-    #     blank=True, null=True, upload_to=get_upload_path, verbose_name="Food image"
-    # )
+
     position = models.PositiveIntegerField(default=1)
     thumbnail = ImageSpecField(
         source="image",
         processors=[ResizeToFill(400, 300)],
-        format="WEBP",  # WebP je výrazne menší ako JPEG
+        format="WEBP",
         options={"quality": 70},
     )
-
-    # def save(self, *args, **kwargs):
-    #     super().save(*args, **kwargs)
-    #     if self.image:
-    #         img = Image.open(self.image.path)
-    #         if img.height > 1000:
-    #             fixed_height = 1000
-    #             height_percent = fixed_height / float(img.size[1])
-    #             width_size = int(float(img.size[0]) * float(height_percent))
-    #             img = img.resize(
-    #                 (width_size, fixed_height), PIL.Image.Resampling.LANCZOS
-    #             )
-    #             img.save(self.image.path, optimize=True, quality=80)
 
     def __str__(self):
         return self.upload_folder or f"Image for {self.food.name}"
@@ -273,21 +254,6 @@ class ImageFood(models.Model):
 
     image_img.short_description = "Thumb"
     image_img.allow_tags = True
-
-    # def delete(self, *args, **kwargs):
-    #     """Delete image file and clean up folder if empty"""
-    #     if self.image and os.path.isfile(self.image.path):
-    #         file_path = self.image.path
-    #         folder = os.path.dirname(file_path)
-
-    #         # delete the file
-    #         os.remove(file_path)
-
-    #         # if folder is now empty, remove it
-    #         if not os.listdir(folder):
-    #             shutil.rmtree(folder)
-
-    #     super().delete(*args, **kwargs)
 
 
 @receiver(post_delete, sender=ImageFood)
@@ -328,7 +294,6 @@ class Foods(models.Model):
         return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
     def save(self, *args, **kwargs):
-        # Pri každom uložení receptu si pripravíme "hľadací" text
         if self.name:
             self.search_name = self.remove_accents(self.name.lower())
         super().save(*args, **kwargs)
@@ -340,5 +305,4 @@ class PasswordReset(models.Model):
     created_when = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
-        #  return self.user
         return f"Password reset for {self.user.email} at {self.created_when}"
