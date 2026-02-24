@@ -1,4 +1,3 @@
-import re
 import unicodedata
 from typing import Any, Dict
 
@@ -8,12 +7,12 @@ from django.contrib.auth import authenticate, get_user_model
 from django.core.exceptions import ValidationError
 from django.core.mail import EmailMessage
 from django.db import transaction
-from django.db.models import ProtectedError, Q, Value
-from django.db.models.functions import Replace
+from django.db.models import Count, ProtectedError
 from django.middleware import csrf
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
+from django_filters import rest_framework as filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import decorators as rest_decorators
 
@@ -52,6 +51,7 @@ from FilkaRecepty.models import (
 )
 from FilkaRecepty.pagination import BlogListCreatePagination
 from FilkaRecepty.serializers import (
+    FoodListSerializer,
     FoodSerializer,
     FoodTagSerializer,
     ImageFoodSerializer,
@@ -68,155 +68,171 @@ from FilkaRecepty.serializers import (
 
 
 def normalize_text(text: str) -> str:
-    """
-    Remove diacritics from Slovak (or any accented) characters.
-    Example: 'čokoláda' -> 'cokolada'
-    """
     return "".join(
         c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
     )
 
 
-class DiacriticInsensitiveSearchFilter(SearchFilter):
-    """
-    SearchFilter that removes Slovak diacritics from BOTH the DB fields
-    and the search terms.
-    """
+class NumberInFilter(filters.BaseInFilter, filters.NumberFilter):
+    pass
 
-    # Map of Slovak diacritics to base chars
-    diacritic_map = {
-        "á": "a",
-        "ä": "a",
-        "č": "c",
-        "ď": "d",
-        "ľ": "l",
-        "ĺ": "l",
-        "ň": "n",
-        "ó": "o",
-        "ô": "o",
-        "ŕ": "r",
-        "š": "s",
-        "ť": "t",
-        "ú": "u",
-        "ý": "y",
-        "ž": "z",
-        "Á": "A",
-        "Ä": "A",
-        "Č": "C",
-        "Ď": "D",
-        "Ľ": "L",
-        "Ĺ": "L",
-        "Ň": "N",
-        "Ó": "O",
-        "Ô": "O",
-        "Ŕ": "R",
-        "Š": "S",
-        "Ť": "T",
-        "Ú": "U",
-        "Ý": "Y",
-        "Ž": "Z",
-    }
 
-    def normalize_queryset(self, queryset, search_fields):
-        """
-        Annotate queryset with diacritic-free versions of search fields.
-        """
-        annotations = {}
-        for field in search_fields:
-            norm_field = f"norm_{re.sub('[^0-9a-zA-Z_]', '_', field)}"
-            expr = Replace(field, Value(" "), Value(" "))  # placeholder
+class FoodsFilter(filters.FilterSet):
+    foodTags = filters.CharFilter(method="filter_all_tags_by_id")
 
-            # Apply all replacements in diacritic_map
-            for src, target in self.diacritic_map.items():
-                expr = Replace(expr, Value(src), Value(target))
+    user__id = filters.NumberFilter(field_name="user__id")
+    user__id__in = NumberInFilter(field_name="user__id", lookup_expr="in")
 
-            annotations[norm_field] = expr
+    class Meta:
+        model = Foods
 
-        return queryset.annotate(**annotations)
+        fields = ["foodTags", "user__id", "user__id__in"]
 
-    def get_search_terms(self, request):
-        params = super().get_search_terms(request)
-        return [normalize_text(p) for p in params]
+    def filter_all_tags_by_id(self, queryset, name, value):
+        tag_ids = self.request.GET.getlist("foodTags")
 
-    def filter_queryset(self, request, queryset, view):
-        search_fields = self.get_search_fields(request, view)
-        search_terms = self.get_search_terms(request)
-
-        if not search_fields or not search_terms:
+        if not tag_ids:
             return queryset
 
-        queryset = self.normalize_queryset(queryset, search_fields)
+        for t_id in tag_ids:
+            queryset = queryset.filter(foodTags__id=t_id)
 
-        orm_lookups = [
-            f"norm_{re.sub('[^0-9a-zA-Z_]', '_', field)}__icontains"
-            for field in search_fields
-        ]
-
-        for term in search_terms:
-            or_queries = Q()
-            for lookup in orm_lookups:
-                or_queries |= Q(**{lookup: term})
-            queryset = queryset.filter(or_queries)
-
-        return queryset
+        return queryset.distinct()
 
 
 class FoodViewSet(viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated,)
     serializer_class = FoodSerializer
-    queryset = Foods.objects.all()
+    queryset = Foods.objects.prefetch_related(
+        "foodTags",
+        "user",
+        "steps",
+        "urls",
+        "images",
+        "ingredients",
+        "ingredients__units",
+        "ingredients__ingredientName",
+    ).all()
     pagination_class = BlogListCreatePagination
 
     filter_backends = [
         DjangoFilterBackend,
-        DiacriticInsensitiveSearchFilter,
         OrderingFilter,
     ]
-    filterset_fields = ["foodTags__foodTag"]
-    search_fields = ["name", "steps__step", "ingredients__ingredientName__ingredient"]
-    # search_fields  = [ 'ingredients__ingredientName__ingredient']
+    filterset_class = FoodsFilter
+
+    search_fields = ["name"]
+
     ordering_fields = ["name", "date"]
     ordering = ["-date"]
 
     def get_queryset(self):
-        queryset = Foods.objects.all()
+        queryset = super().get_queryset()
         search_query = self.request.query_params.get("search", "")
 
         if search_query:
-            search_query = self.remove_accents(search_query.lower())
+            clean_query = self.remove_accents(search_query.lower())
 
-            matching_ids = []
-            for obj in queryset:
-                if hasattr(obj, "name") and isinstance(obj.name, str):
-                    name_normalized = self.remove_accents(obj.name.lower())
-                else:
-                    name_normalized = ""
+            return queryset.filter(search_name__icontains=clean_query)
 
-                if hasattr(obj, "steps"):
-                    for st in obj.steps.all():
-                        if isinstance(st.step, str):
-                            description_normalized = self.remove_accents(
-                                st.step.lower()
-                            )
-                        else:
-                            description_normalized = ""
+        return queryset
 
-                if (
-                    search_query in name_normalized
-                    or search_query in description_normalized
-                ):
-                    matching_ids.append(obj.id)
+    def _get_extra_filters_data(self):
+        """Pomocná metóda, aby sme nepísali ten istý kód dvakrát"""
+        return {
+            "unitsQf": UnitSerializer(Unit.objects.all(), many=True).data,
+            "tagGroupQf": TagGroupSerializer(TagGroups.objects.all(), many=True).data,
+        }
 
-            return queryset.filter(id__in=matching_ids)
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        response.data.update(self._get_extra_filters_data())
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+
+        data = serializer.data
+
+        data.update(self._get_extra_filters_data())
+
+        return Response(data)
+
+    def perform_create(self, serializer):
+        instance = serializer.save()
+
+        return Foods.objects.prefetch_related("ingredients", "foodTags").get(
+            pk=instance.pk
+        )
+
+
+class FoodListViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = (IsAuthenticated,)
+    queryset = Foods.objects.prefetch_related(
+        "foodTags",
+        "user",
+        "steps",
+        "urls",
+        "images",
+        "ingredients",
+        "ingredients__units",
+        "ingredients__ingredientName",
+    ).all()
+
+    serializer_class = FoodListSerializer
+
+    pagination_class = BlogListCreatePagination
+
+    filter_backends = [
+        DjangoFilterBackend,
+        OrderingFilter,
+    ]
+    filterset_class = FoodsFilter
+
+    search_fields = ["name"]
+
+    ordering_fields = ["name", "date"]
+    ordering = ["-date"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        search_query = self.request.query_params.get("search", "")
+
+        if search_query:
+            clean_query = self.remove_accents(search_query.lower())
+
+            queryset = queryset.filter(search_name__icontains=clean_query)
 
         return queryset
 
     def remove_accents(self, text):
-        """Remove diacritics from Slovak text safely."""
         if not isinstance(text, str):
             return text
         nfkd_form = unicodedata.normalize("NFKD", text)
         return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+        else:
+            serializer = self.get_serializer(queryset, many=True)
+            response = Response(serializer.data)
+
+        users = CustomUser.objects.all()
+        tags = FoodTags.objects.all()
+        tag_groups = TagGroups.objects.all()
+
+        response.data["usersQf"] = UserSerializer(users, many=True).data
+        response.data["tagsQf"] = FoodTagSerializer(tags, many=True).data
+        response.data["tagGroupQf"] = TagGroupSerializer(tag_groups, many=True).data
+        response.data["total_foods_count"] = Foods.objects.count()
+        return response
 
 
 class FoodTagsViewSet(viewsets.ModelViewSet):
@@ -318,11 +334,9 @@ class TagGroupViewSet(viewsets.ModelViewSet):
             )
 
         except ValidationError as e:
-            # Toto zachytí tvoju vlastnú funkciu delete na FoodTags
             return Response({"detail": e.message}, status=status.HTTP_400_BAD_REQUEST)
 
         except Exception:
-            # Ak sa stane niečo iné, vrátiš 500
             return Response(
                 {"detail": "Problem so serverom."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -333,6 +347,20 @@ class UsersViewSet(viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated,)
     serializer_class = UsersSerializer
     queryset = CustomUser.objects.all()
+
+    filter_backends = [
+        DjangoFilterBackend,
+        SearchFilter,
+        OrderingFilter,
+    ]
+    filterset_fields = ["id"]
+
+    search_fields = ["id"]
+    ordering_fields = ["id"]
+    ordering = ["id"]
+
+    def get_queryset(self):
+        return CustomUser.objects.annotate(foods_count=Count("foods")).all()
 
 
 class StepsViewSet(viewsets.ModelViewSet):
@@ -437,7 +465,7 @@ class IngredientViewSet(viewsets.ModelViewSet):
 class UnitViewSet(viewsets.ModelViewSet):
     permission_classes = (IsAuthenticated,)
     serializer_class = UnitSerializer
-    queryset = Unit.objects.all()
+    queryset = Unit.objects.all().order_by("id")
     filter_backends = [
         DjangoFilterBackend,
         SearchFilter,
@@ -492,12 +520,34 @@ class ImageFoodViewSet(viewsets.ModelViewSet):
     queryset = ImageFood.objects.all()
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        food = self.request.query_params.get("food")
-        if food:
-            queryset = queryset.filter(food__id=food)
+        """
+        Zabezpečí, že ak zavoláš /api/imagefood/?food=10,
+        vráti to len fotky k danému receptu.
+        """
+        qs = ImageFood.objects.all()
 
-        return queryset
+        food_id = self.request.query_params.get("food")
+        if food_id:
+            qs = qs.filter(food__id=food_id)
+
+        return qs
+
+    def perform_create(self, serializer):
+        food_id = self.request.data.get("food")
+        image_obj = self.request.data.get("image")
+
+        if not food_id or not image_obj:
+            serializer.save()
+            return
+
+        image_name = image_obj.name
+
+        if ImageFood.objects.filter(
+            food_id=food_id, image__icontains=image_name
+        ).exists():
+            return
+
+        serializer.save()
 
 
 class EmailTokenObtainPairView(TokenObtainPairView):
@@ -533,10 +583,13 @@ class UsersView(APIView):
         user = self.request.user
 
         if user.is_superuser:
-            items = CustomUser.objects.all()
+            items = CustomUser.objects.annotate(foods_count=Count("foods")).all()
             serializer = UsersSerializer(items, many=True, context={"request": request})
         else:
-            serializer = UserSerializer(user, context={"request": request})
+            annotated_user = CustomUser.objects.annotate(
+                foods_count=Count("foods")
+            ).get(id=user.id)
+            serializer = UserSerializer(annotated_user, context={"request": request})
 
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -570,7 +623,7 @@ class CookieTokenObtainPairView(TokenObtainPairView):
             user_serializer = UserSerializer(user)
             response.data["user"] = user_serializer.data
         if response.data.get("refresh"):
-            cookie_max_age = 3600 * 24 * 14  # 14 days
+            cookie_max_age = 3600 * 24 * 14
             response.set_cookie(
                 "refresh_token",
                 response.data["refresh"],
@@ -651,7 +704,9 @@ def loginView(request):
                 {"message": "Účet je deaktivovaný."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
-        tokens = get_user_tokens(user)
+        user_with_counts = get_annotated_user(user.id)
+
+        tokens = get_user_tokens(user_with_counts)
         res = response.Response(
             {
                 "success": True,
@@ -678,80 +733,13 @@ def loginView(request):
 
         res.data = {"access_token": tokens.get("access_token")}
 
-        user_serializer = UserSerializer(user)
+        user_serializer = UserSerializer(user_with_counts)
+        print(user_serializer.data)
         res.data["user"] = user_serializer.data
-
-        # res.set_cookie(
-        #     key=settings.SIMPLE_JWT['AUTH_COOKIE_USER'],
-        #     value=user_serializer.data['email'],
-        #     httponly=settings.SIMPLE_JWT['AUTH_COOKIE_HTTP_ONLY'],
-
-        # )
 
         res["X-CSRFToken"] = csrf.get_token(request)
         return res
     raise rest_exceptions.AuthenticationFailed("Zadaný email alebo heslo je neplatné!")
-
-
-# def loginView(request):
-#     serializer = LoginSerializer(data=request.data)
-#     if not serializer.is_valid():
-#         return response.Response(
-#             {
-#                 "message": "Chýbajúce údaje alebo nesprávny formát.",
-#                 "errors": serializer.errors,
-#             },
-#             status=status.HTTP_400_BAD_REQUEST,
-#         )
-#     serializer.is_valid(raise_exception=True)
-
-#     email = serializer.validated_data["email"]
-#     password = serializer.validated_data["password"]
-
-#     user = authenticate(email=email, password=password)
-#     if user is not None:
-#         if not user.is_active:
-#             return response.Response(
-#                 {"message": "Účet je deaktivovaný."},
-#                 status=status.HTTP_401_UNAUTHORIZED,
-#             )
-
-#         tokens = get_user_tokens(user)
-#         user_serializer = UserSerializer(user, context={"request": request})
-#         res = response.Response(
-#             {
-#                 "access": tokens["access_token"],
-#                 "user": user_serializer.data,
-#                 "success": True,
-#             },
-#             status=status.HTTP_200_OK,
-#         )
-
-#         cookie_settings = {
-#             "secure": settings.SIMPLE_JWT.get("AUTH_COOKIE_SECURE", False),
-#             "httponly": settings.SIMPLE_JWT.get("AUTH_COOKIE_HTTP_ONLY", True),
-#             "samesite": settings.SIMPLE_JWT.get("AUTH_COOKIE_SAMESITE", "Lax"),
-#         }
-
-#         res.set_cookie(
-#             key=settings.SIMPLE_JWT["AUTH_COOKIE"],
-#             value=tokens["access_token"],
-#             expires=timezone.now() + settings.SIMPLE_JWT["ACCESS_TOKEN_LIFETIME"],
-#             **cookie_settings,
-#         )
-
-#         res.set_cookie(
-#             key=settings.SIMPLE_JWT["AUTH_COOKIE_REFRESH"],
-#             value=tokens["refresh_token"],
-#             expires=timezone.now() + settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"],
-#             **cookie_settings,
-#         )
-
-#         res["X-CSRFToken"] = csrf.get_token(request)
-#         return res
-#     return response.Response(
-#         {"message": "Nesprávny email alebo heslo."}, status=status.HTTP_401_UNAUTHORIZED
-#     )
 
 
 @method_decorator(csrf_protect, name="dispatch")
@@ -804,10 +792,6 @@ class GetCSRFToken(APIView):
     permission_classes = (permissions.AllowAny,)
 
     def get(self, request, format=None):
-        # resp=Response()
-        # resp.set_cookie("testing","testing_token",sametime="String")
-        # return resp
-        # print("CSFRTOken GET")
         return Response({"success": "CSRF cookie set"})
 
 
@@ -975,3 +959,7 @@ class RecipeEmailSubmit(APIView):
                 data={"success": True, "message": "Recept odoslany!"},
                 status=status.HTTP_201_CREATED,
             )
+
+
+def get_annotated_user(user_id):
+    return CustomUser.objects.annotate(foods_count=Count("foods")).get(id=user_id)
