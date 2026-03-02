@@ -734,7 +734,7 @@ def loginView(request):
         res.data = {"access_token": tokens.get("access_token")}
 
         user_serializer = UserSerializer(user_with_counts)
-        print(user_serializer.data)
+
         res.data["user"] = user_serializer.data
 
         res["X-CSRFToken"] = csrf.get_token(request)
@@ -748,9 +748,7 @@ class ForgotPassword(APIView):
 
     def post(self, request, *args, **kwargs):
         if request.method == "POST":
-            print("request", request)
             email = request.POST.get("email")
-            print("Email", email)
             email = request.data["email"]
 
             if CustomUser.objects.filter(email=email).exists():
@@ -807,11 +805,9 @@ class ResetPassword(APIView):
         reset_id = data["reset_id"]
         password_reset_id = PasswordReset.objects.get(reset_id=reset_id)
         if password_reset_id:
-            print("password_reset_id :", password_reset_id)
             passwords_have_error = False
             if password != confirm_password:
                 passwords_have_error = True
-                print("passwords do not match")
                 return Response(
                     data={"success": False, "message": "Hesla sa nezhoduju"},
                     status=status.HTTP_409_CONFLICT,
@@ -829,8 +825,6 @@ class ResetPassword(APIView):
             expiration_time = password_reset_id.created_when + timezone.timedelta(
                 hours=1
             )
-            print("expiration_time :", expiration_time)
-            print("timezone.now() :", timezone.now())
             if timezone.now() > expiration_time:
                 passwords_have_error = True
                 password_reset_id.delete()
@@ -913,20 +907,15 @@ class RecipeEmailSubmit(APIView):
     def get(self, request):
         data = self.request.data
         recipe = data["recipe"]
-        print(recipe)
         foodID = Foods.objects.get(id=recipe)
         food_serializer = FoodSerializer(foodID)
-        print(food_serializer.data)
         if food_serializer:
             name = food_serializer.data.get("name")
-            print(name)
             ingredients = food_serializer.data.get("ingredients")
-            print(ingredients)
             steps = food_serializer.data.get("steps")
             ingredietsBox = []
             stepsBox = []
             for x in ingredients:
-                print(x)
                 ingre = Ingredients.objects.get(id=x)
                 ingre_serializer = IngredientsSerializer(ingre)
                 quantity = ingre_serializer.data.get("quantity")
@@ -949,12 +938,9 @@ class RecipeEmailSubmit(APIView):
                 stepsBox.insert(3, step_serializer.data)
 
             a = sorted(stepsBox, key=lambda x: x["position"], reverse=False)
-            print(a)
             newStepList = []
             for i in enumerate(a):
                 newStepList.insert(i.step)
-            print(newStepList)
-
             return Response(
                 data={"success": True, "message": "Recept odoslany!"},
                 status=status.HTTP_201_CREATED,
