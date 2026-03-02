@@ -203,7 +203,6 @@ class IngredientsSerializer(serializers.ModelSerializer):
         return IngredientSerializer(ingredients, many=True).data
 
     def validate_ingredientName(self, value):
-        print(f"DEBUG: validate_ingredientName{value}  ")
         if not value or len(value) == 0:
             raise serializers.ValidationError(
                 "Ingrediencia musí mať aspoň jeden názov."
